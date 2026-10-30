@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="nl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LapTrack – Color Racing Timer</title>
+<style>
+:root{font-family:Inter,system-ui,Segoe UI,Arial,sans-serif;color:#edf2f7;background:#10151d}
+*{box-sizing:border-box}body{margin:0;padding:22px;background:linear-gradient(135deg,#10151d,#182333);min-height:100vh}
+main{max-width:1200px;margin:auto}.top{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap}
+h1{font-size:28px;margin:0}.sub{color:#9eacbd;margin:6px 0 20px}
+.panel{background:#1b2635;border:1px solid #304155;border-radius:14px;padding:16px;margin:14px 0;box-shadow:0 8px 24px #0003}
+.controls{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+button,.filelabel{background:#2878d0;color:white;border:0;border-radius:9px;padding:10px 14px;font-weight:650;cursor:pointer}
+button.secondary{background:#34465d}button.danger{background:#a83c48}button:disabled{opacity:.45;cursor:not-allowed}
+label{color:#cbd5e1;font-size:14px}input,select{background:#111a26;color:#edf2f7;border:1px solid #40536a;border-radius:8px;padding:9px}
+input[type=number]{width:100px}input[type=range]{vertical-align:middle}
+.grid{display:grid;grid-template-columns:minmax(0,1.5fr) minmax(280px,1fr);gap:14px}
+@media(max-width:800px){.grid{grid-template-columns:1fr}}
+.video-wrap{position:relative;background:#05080c;border-radius:10px;overflow:hidden;min-height:220px;display:grid;place-items:center}
+video{width:100%;display:block;max-height:620px;object-fit:contain;transform:scaleX(1)}
+#overlay{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
+.hint{font-size:13px;color:#9eacbd;line-height:1.5}.stat{display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid #304155}
+.car{border:1px solid #34465d;border-radius:10px;padding:12px;margin:10px 0}
+.swatch{display:inline-block;width:13px;height:13px;border-radius:50%;margin-right:7px;border:1px solid #fff8;vertical-align:middle}
+.carhead{display:flex;justify-content:space-between;align-items:center;gap:8px}
+table{width:100%;border-collapse:collapse;font-size:14px}th,td{text-align:left;padding:9px 7px;border-bottom:1px solid #34465d}th{color:#9eacbd}
+#status{color:#9fe0b2;font-size:14px}.warn{color:#ffd27a}.small{font-size:12px;color:#9eacbd}
+</style>
+</head>
+<body>
+<main>
+  <div class="top"><div><h1>🏁 LapTrack</h1><div class="sub">Color Racing Timer · webcam lap detection</div></div><div id="status">Camera niet gestart</div></div>
+  <div class="panel controls">
+    <button id="start">Start camera</button>
+    <button id="stop" class="secondary" disabled>Stop camera</button>
+    <button id="addCar" class="secondary" disabled>+ Auto toevoegen (klik op kleur)</button>
+    <button id="sound" class="secondary">Geluid: aan</button>
+  </div>
+  <div class="grid">
+    <section class="panel">
+      <h3 style="margin-top:0">Camerabeeld & finishlijn</h3>
+      <div class="video-wrap" id="videoWrap">
+        <video id="video" autoplay muted playsinline></video>
+        <canvas id="overlay"></canvas>
+      </div>
+      <p class="hint">Start de camera. Klik daarna op een duidelijk zichtbaar gekleurd deel van een auto om die kleur toe te voegen. Klik in het camerabeeld om de verticale finishlijn te verplaatsen.</p>
+      <div class="controls">
+        <label>Richting:
+          <select id="direction"><option value="ltr">Links → rechts</option><option value="rtl">Rechts → links</option></select>
+        </label>
+        <label>Rondelengte (meter): <input id="distance" type="number" min="0.1" step="0.1" value="20"></label>
+        <label><input id="notify" type="checkbox" checked> Meldingen</label>
+      </div>
+      <p class="small">De snelheid is de gemiddelde snelheid over de ingevoerde rondelengte. De detectie werkt het best met goede verlichting, contrasterende autokleuren en een vaste camera.</p>
+    </section>
+    <aside class="panel">
+      <h3 style="margin-top:0">Auto's volgen</h3>
+      <div id="cars"><p class="hint">Nog geen auto's toegevoegd.</p></div>
+      <button id="reset" class="danger" style="margin-top:8px">Reset alle rondetijden</button>
+    </aside>
+  </div>
+  <section class="panel">
+    <h3 style="margin-top:0">Rondegeschiedenis</h3>
+    <div style="overflow-x:auto"><table><thead><tr><th>Auto</th><th>Ronde</th><th>Rondetijd</th><th>Gem. snelheid</th><th>Tijdstip</th></tr></thead><tbody id="history"><tr><td colspan="5" class="hint">Nog geen rondes geregistreerd.</td></tr></tbody></table></div>
+  </section>
+  <canvas id="work" width="320" height="180" hidden></canvas>
+</main>
+<script>
+(() => {
+ const video=document.getElementById('video'), overlay=document.getElementById('overlay'), ctx=overlay.getContext('2d');
+ const work=document.getElementById('work'), wctx=work.getContext('2d',{willReadFrequently:true});
+ const statusEl=document.getElementById('status'), carsEl=document.getElementById('cars'), historyEl=document.getElementById('history');
+ let stream=null, running=false, cars=[], gateX=.5, lastFrame=0, soundOn=true, nextId=1, history=[], sampleMode=false;
+ const $=id=>document.getElementById(id);
+ const say=(s,warning=false)=>{statusEl.textContent=s;statusEl.className=warning?'warn':''};
+ function resizeOverlay(){const r=video.getBoundingClientRect();overlay.width=Math.max(1,Math.round(r.width*devicePixelRatio));overlay.height=Math.max(1,Math.round(r.height*devicePixelRatio));}
+ window.addEventListener('resize',resizeOverlay);
+ $('start').onclick=async()=>{
+   try{
+    stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:'environment'},audio:false});
+    video.srcObject=stream; await video.play(); running=true;
+    $('start').disabled=true;$('stop').disabled=false;$('addCar').disabled=false;
+    say('Camera actief');resizeOverlay();requestAnimationFrame(loop);
+   }catch(e){say('Camera niet beschikbaar: '+e.message,true)}
+ };
+ $('stop').onclick=()=>{running=false;if(stream)stream.getTracks().forEach(t=>t.stop());stream=null;video.srcObject=null;$('start').disabled=false;$('stop').disabled=true;$('addCar').disabled=true;say('Camera gestopt');ctx.clearRect(0,0,overlay.width,overlay.height)};
+ $('sound').onclick=()=>{soundOn=!soundOn;$('sound').textContent='Geluid: '+(soundOn?'aan':'uit')};
+ $('addCar').onclick=()=>{sampleMode=true;say('Selectiemodus: klik nu op een duidelijk gekleurd deel van de auto.');};
+ video.addEventListener('click',e=>{
+   if(!running)return;
+   const r=video.getBoundingClientRect(), x=(e.clientX-r.left)/r.width;
+   if(sampleMode){addCarAt(e);sampleMode=false;return}
+   gateX=Math.max(.03,Math.min(.97,x));say('Finishlijn verplaatst');
+ });
+ function addCarAt(e){
+   const r=video.getBoundingClientRect(), px=Math.max(0,Math.min(319,Math.floor((e.clientX-r.left)/r.width*320)));
+   const py=Math.max(0,Math.min(179,Math.floor((e.clientY-r.top)/r.height*180)));
+   wctx.drawImage(video,0,0,320,180);
+   const d=wctx.getImageData(px,py,1,1).data;
+   if(d[3]<10 || Math.max(d[0],d[1],d[2])-Math.min(d[0],d[1],d[2])<18){say('Kies een duidelijk gekleurd deel van de auto.',true);return}
+   const car={id:nextId,name:'Auto '+nextId,color:[d[0],d[1],d[2]],tolerance:68,lap:0,lastCross:0,lastX:null,lastY:null,lastSeen:0,best:null,lastLap:null,avg:null};
+   cars.push(car);nextId++;renderCars();say(car.name+' toegevoegd');
+ }
+ // connected components on a small image, with a modest color tolerance
+ function detect(car,data){
+   const W=320,H=180, n=W*H, mask=new Uint8Array(n), [cr,cg,cb]=car.color;
+   for(let i=0,p=0;i<n;i++,p+=4){
+     const dr=data[p]-cr,dg=data[p+1]-cg,db=data[p+2]-cb;
+     if(dr*dr+dg*dg+db*db<car.tolerance*car.tolerance)mask[i]=1;
+   }
+   const seen=new Uint8Array(n), q=new Int32Array(n);let best=null,bestCount=0;
+   for(let i=0;i<n;i++){
+    if(!mask[i]||seen[i])continue;let h=0,t=0,count=0,sx=0,sy=0,minX=320,maxX=0,minY=180,maxY=0;
+    q[t++]=i;seen[i]=1;
+    while(h<t){const v=q[h++],x=v%W,y=(v/W)|0;count++;sx+=x;sy+=y;minX=Math.min(minX,x);maxX=Math.max(maxX,x);minY=Math.min(minY,y);maxY=Math.max(maxY,y);
+      const ns=[x>0?v-1:-1,x<W-1?v+1:-1,y>0?v-W:-1,y<H-1?v+W:-1];
+      for(const z of ns)if(z>=0&&mask[z]&&!seen[z]){seen[z]=1;q[t++]=z}
+    }
+    if(count>bestCount&&count>=8&&count<4500){bestCount=count;best={x:sx/count,y:sy/count,count,minX,maxX,minY,maxY}}
+   }
+   return best;
+ }
+ function beep(){
+   if(!soundOn)return;
+   try{const AC=window.AudioContext||window.webkitAudioContext,a=new AC(),o=a.createOscillator(),g=a.createGain();o.connect(g);g.connect(a.destination);o.frequency.value=880;g.gain.setValueAtTime(.12,a.currentTime);g.gain.exponentialRampToValueAtTime(.001,a.currentTime+.22);o.start();o.stop(a.currentTime+.23)}catch(e){}
+ }
+ function cross(car,p,now){
+   if(!p){if(now-car.lastSeen>1200)car.lastX=null;return}
+   const x=p.x/320, y=p.y/180;car.lastSeen=now;
+   if(car.lastX!==null){
+    const forward=$('direction').value==='ltr'?(car.lastX<gateX&&x>=gateX):(car.lastX>gateX&&x<=gateX);
+    const near= Math.abs(car.lastY-y)<.35;
+    if(forward&&near&&now-car.lastCross>1800){
+      car.lastCross=now;
+      if(car.lap>0){
+       const lapTime=(now-car.lapStart)/1000;car.lastLap=lapTime;car.best=car.best===null?lapTime:Math.min(car.best,lapTime);
+       const distance=Math.max(.1,Number($('distance').value)||20),speed=distance/lapTime*3.6;
+       history.unshift({name:car.name,lap:car.lap,time:lapTime,speed,timeAt:new Date().toLocaleTimeString()});history=history.slice(0,100);
+       renderHistory();beep();if($('notify').checked){say(car.name+' — ronde '+car.lap+' voltooid: '+lapTime.toFixed(2)+' s');if('Notification'in window&&Notification.permission==='granted')new Notification('LapTrack: '+car.name,{body:'Ronde '+car.lap+' · '+lapTime.toFixed(2)+' s · '+speed.toFixed(1)+' km/u'})}
+      }else{beep();say(car.name+' passeert de finishlijn')}
+      car.lap++;car.lapStart=now;renderCars();
+    }
+   }
+   car.lastX=x;car.lastY=y;
+ }
+ function loop(now){
+   if(!running)return;
+   if(video.readyState>=2&&now-lastFrame>45){
+    lastFrame=now;wctx.drawImage(video,0,0,320,180);const data=wctx.getImageData(0,0,320,180).data;
+    cars.forEach(c=>cross(c,detect(c,data),now));
+    drawOverlay();
+   }
+   requestAnimationFrame(loop);
+ }
+ function drawOverlay(){
+   const r=video.getBoundingClientRect(),sx=overlay.width/320,sy=overlay.height/180;
+   ctx.clearRect(0,0,overlay.width,overlay.height);ctx.strokeStyle='#ffdf59';ctx.lineWidth=3*devicePixelRatio;ctx.setLineDash([8,6]);
+   ctx.beginPath();ctx.moveTo(gateX*overlay.width,0);ctx.lineTo(gateX*overlay.width,overlay.height);ctx.stroke();ctx.setLineDash([]);
+   cars.forEach(c=>{if(c.lastX===null)return;ctx.fillStyle=`rgb(${c.color.join(',')})`;ctx.beginPath();ctx.arc(c.lastX*overlay.width,c.lastY*overlay.height,7*devicePixelRatio,0,Math.PI*2);ctx.fill();ctx.strokeStyle='white';ctx.lineWidth=1.5*devicePixelRatio;ctx.stroke()});
+ }
+ function renderCars(){
+  if (!cars.length) {
+    carsEl.innerHTML = "<p class='hint'>Nog geen auto's toegevoegd.</p>";
+    return;
+}
+  carsEl.innerHTML=cars.map(c=>`<div class="car"><div class="carhead"><strong><span class="swatch" style="background:rgb(${c.color.join(',')})"></span>${c.name}</strong><button class="danger" data-remove="${c.id}">Verwijder</button></div><div class="stat"><span>Ronde</span><strong>${c.lap}</strong></div><div class="stat"><span>Laatste ronde</span><strong>${c.lastLap===null?'—':c.lastLap.toFixed(2)+' s'}</strong></div><div class="stat"><span>Snelste ronde</span><strong>${c.best===null?'—':c.best.toFixed(2)+' s'}</strong></div></div>`).join('');
+  carsEl.querySelectorAll('[data-remove]').forEach(b=>b.onclick=()=>{cars=cars.filter(c=>c.id!==Number(b.dataset.remove));renderCars()});
+ }
+ function renderHistory(){historyEl.innerHTML=history.length?history.map(h=>`<tr><td>${h.name}</td><td>${h.lap}</td><td>${h.time.toFixed(2)} s</td><td>${h.speed.toFixed(1)} km/u</td><td>${h.timeAt}</td></tr>`).join(''):'<tr><td colspan="5" class="hint">Nog geen rondes geregistreerd.</td></tr>'}
+ $('reset').onclick=()=>{cars.forEach(c=>{c.lap=0;c.lastCross=0;c.lastX=null;c.lapStart=null;c.lastLap=null;c.best=null});history=[];renderCars();renderHistory();say('Rondetijden gereset')};
+ $('notify').addEventListener('change',async()=>{if($('notify').checked&&'Notification'in window&&Notification.permission==='default')await Notification.requestPermission()});
+ // Finish gate position is set by clicking near the middle of the camera image; edge clicks sample a car color.
+})();
+</script>
+</body>
+</html>
